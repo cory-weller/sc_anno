@@ -1,91 +1,186 @@
 #!/usr/bin/env Rscript
 
+# This requires two argumens
+# @arg[1] a pathway to a folder containing an outs folder of cellranger output
+# @arg[2] a sample_name for this run
 
-lapply(c("dplyr","Seurat","HGNChelper", "ggplot2", "ggthemes"), library, character.only = T)
+args = commandArgs(trailingOnly=TRUE)
 
-dat <- Read10X(data.dir = ".")  # edit if data not in current directory
+# test if there is at least one argument: if not, return an error
+if (length(args)==0) {
+  stop("At least one argument must be supplied (input file).n", call.=FALSE)
+}
+
+# MAx number of PCs to explore
+MAX_PCS <- 60
+
+# load libraries
+# sctype_env_2
+lapply(c("dplyr","Seurat","HGNChelper", "openxlsx", "ggplot2",
+         "sctransform", "Signac", "EnsDb.Hsapiens.v86"), 
+         library, character.only = T)
+# params <- list()
+print(paste0("Sample name: ", sample_name))
+base_dir <- paste0(args[1], '/outs/')
+# test with sample <- 'SH9608-ARC' which is in batch1
+#
+# base_dir <- paste0('/data/CARD_singlecell/Brain_atlas/NABEC_multiome/', batch, '/Multiome/',sample_name, '/outs/')
+sample_name <- args[2]
+
+# make directory in figures
+if (!dir.exists('figures/') {
+        dir.create('figures')
+}
+figure_folder <- paste0('figures/', sample_name)
+dir.create(figure_folder)
 
 # Initialize the Seurat object with the raw (non-normalized data).
-dat <- CreateSeuratObject(counts = dat$`Gene Expression`, project = "test", min.cells = 3, min.features = 200)
+input_data <- Read10X(data.dir = paste0(base_dir, "filtered_feature_bc_matrix/"))
 
-# normalize data
-dat[["percent.mt"]] <- PercentageFeatureSet(dat, pattern = "^MT-")
-dat <- NormalizeData(dat, normalization.method = "LogNormalize", scale.factor = 10000)
-dat <- FindVariableFeatures(dat, selection.method = "vst", nfeatures = 2000)
+library(GenomicFeatures)
+tx <- makeTxDvFromGFF()
+transcripts(tx)
+
+# Whether the data are multiome or unimodal
+# If they are multiome set multiome <- TRUE
+if (length(input_data) > 1){
+    rna_counts <- input_data[['Gene Expression']]
+    atac_counts <- input_data[['Peaks']]
+    data <- CreateSeuratObject(counts = rna_counts, project = sample_name);
+    #message("Using RNA data only")
+    grange.counts <- StringToGRanges(rownames(atac_counts), sep = c(":", "-"))
+    grange.use <- seqnames(grange.counts) %in% standardChromosomes(grange.counts)
+    atac_counts <- atac_counts[as.vector(grange.use), ]
+    annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+    genome(annotations) <- "hg38"
+    seqlevelsStyle(annotations) <- 'UCSC'
+    #data.atac <- CreateAssayObject(atac_counts[, colnames(x = data)])
+    #data  <- NormalizeData(data, assay = "Peaks", normalization.method = "CLR")
+    frag.file <- paste0(base_dir, "atac_fragments.tsv.gz")
+    chrom_assay <- CreateChromatinAssay(
+        counts = atac_counts,
+        sep = c(":", "-"),
+        genome = 'hg38',
+        fragments = frag.file,
+        min.cells = 3,
+        annotation = annotations,
+        validate.fragments = TRUE
+    )
+    data[['ATAC']] <- chrom_assay
+} else {
+    data <- CreateSeuratObject(counts = input_data, project = sample_name, min.cells = 3, min.features = 200)
+    data <- RunPCA(data, npcs = MAX_PCS, features = VariableFeatures(object = data))
+
+    # Check number of PC components (we selected 10 PCs for downstream analysis, based on Elbow plot)
+    pdf(paste0(figure_folder,'/', sample_name, '_elbow', '.pdf'))
+    ElbowPlot(data, ndims=MAX_PCS,reduction='pca')
+    dev.off()
+    
+    data <- JackStraw(data, dims=MAX_PCS, num.replicate=80, maxit=900)
+    data <- ScoreJackStraw(data, dims=1:MAX_PCS)
+    upper_b <- min(which(JS(data[['pca']], 'overall')[,2] >= 0.05))
+    print(paste0("total number of PCs used. 
+                Make sense? : ", upper_b))
+    if (upper_b == 'Inf'){
+        upper_b <- MAX_PCS
+    }
+    pdf(paste0(figure_folder,'/', sample_name, '_jackstraw', '.pdf'))
+    JackStrawPlot(data,dims = 1:upper_b)
+    dev.off()
+    
+    
+    # cluster and visualize
+    data <- FindNeighbors(data, dims = 1:upper_b)
+    data <- FindClusters(data, resolution = 0.2)
+    data <- RunUMAP(data, dims = 1:upper_b)
+    
+    pdf(paste0(figure_folder,'/', sample_name, '_cluster', '.pdf'))
+    DimPlot(data, reduction = "umap")
+    dev.off()
+}
+
+# NOTE: Need to figure out when to take these out and when to simply display
+# People seem divided on this.
+data[["percent.mt"]] <- PercentageFeatureSet(data, pattern = "^MT-")
+pdf(paste0(figure_folder,'/', sample_name, '_qc', '.pdf'))
+VlnPlot(data, features = c("nCount_ATAC", "nCount_RNA","percent.mt"), ncol = 3,
+  log = TRUE, pt.size = 0) + NoLegend()
+dev.off()
+
+# data <- NormalizeData(data, normalization.method = "LogNormalize", scale.factor = 10000)
+# data <- FindVariableFeatures(data, selection.method = "vst", nfeatures = 2000)
 
 # scale and run PCA
-dat <- ScaleData(dat, features = rownames(dat))
-dat <- RunPCA(dat, features = VariableFeatures(object = dat))
+#data <- ScaleData(data, features = rownames(data))
 
-# Check number of PC components 
-g1 <- ElbowPlot(dat) + theme_few() + geom_hline(yintercept=2.5, linetype='dashed', alpha=0.5)
-ggsave(g1, file='elbow_plot.png')
-
-
-n_pcs <- 10     # went with 10 PCs
-
-# cluster and visualize
-dat <- FindNeighbors(dat, dims = 1:n_pcs)
-dat <- FindClusters(dat, resolution = 0.8)
-dat <- RunUMAP(dat, dims = 1:n_pcs)
-g2 <- DimPlot(dat, reduction = "umap")
-ggsave(g2, file='umap_1.png', width=25, height=18, units='cm')
 
 
 # load gene set preparation function
-# source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
-source("gene_sets_prepare.R")
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
 # load cell type annotation function
-#source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
-source("sctype_score_.R")
-
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
 
 # DB file
-# db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
-db_ = "ScTypeDB_full.xlsx"
+#db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+db_ = "data/ScTypeDB_full.xlsx"
 tissue = "Brain" # e.g. Immune system,Pancreas,Liver,Eye,Kidney,Brain,Lung,Adrenal,Heart,Intestine,Muscle,Placenta,Spleen,Stomach,Thymus 
 
 # prepare gene sets
 gs_list = gene_sets_prepare(db_, tissue)
 
 
-# get cell-type by cell matrix
-es.max = sctype_score(scRNAseqData = dat[["RNA"]]@scale.data, scaled = TRUE, 
+# Celltype
+es.max = sctype_score(scRNAseqData = data[["RNA"]]@scale.data, scaled = TRUE, 
                       gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
 
+# NOTE: FOR NOW JUST USE THE SAME NAMES BECAUSE WE HAVE NO A PRIORI REASON TO MODIFY
+# As soon as we do, we can change the names. But that will be a next step
+# See https://stuartlab.org/signac/articles/pbmc_vignette.html#create-a-gene-activity-matrix for information on how to get ATAC data to reasonable matching to rnaseq for assimilation into this measure.
+es.max_ATAC = sctype_score(scRNAseqData = data[['ATAC']]@counts, scaled=FALSE,gs_list$gs_positive, gs2=gs_list$gs_negative)
+
 # NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
-# In case Seurat is used, it is either dat[["RNA"]]@scale.data (default), dat[["SCT"]]@scale.data, in case sctransform is used for normalization,
-# or dat[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+# In case Seurat is used, it is either data[["RNA"]]@scale.data (default), data[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or data[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
 
 # merge by cluster
-cL_resutls = do.call("rbind", lapply(unique(dat@meta.data$seurat_clusters), function(cl){
-    es.max.cl = sort(rowSums(es.max[ ,rownames(dat@meta.data[dat@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
-    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(dat@meta.data$seurat_clusters==cl)), 10)
+cL_results = do.call("rbind", lapply(unique(data@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(data@meta.data[data@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(data@meta.data$seurat_clusters==cl)), 10)
 }))
-sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+sctype_scores = cL_results %>% group_by(cluster) %>% top_n(n = 1, wt = scores)
+markers <- FindAllMarkers(data, densify=TRUE, min.pct=0.18)
+marker_scores <- merge(sctype_scores, markers, on="cluster")
+marker_scores <- marker_scores[c('cluster','type','ncells','p_val','avg_log2FC','pct.1','pct.2','p_val_adj','gene')]
+# sort by p_Adj_values
+markers <- arrange(marker_scores, cluster, p_val_adj)
+write.csv(markers, file=paste0(figure_folder, '/', sample_name, '_markers', '.csv'), row.names=FALSE)
 
 # set low-confident (low ScType score) clusters to "unknown"
 sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
 print(sctype_scores[,1:3])
 
-dat@meta.data$customclassif = ""
+data@meta.data$customclassif = ""
 for(j in unique(sctype_scores$cluster)){
   cl_type = sctype_scores[sctype_scores$cluster==j,]; 
-  dat@meta.data$customclassif[dat@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+  data@meta.data$customclassif[data@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
 }
+g3 <- DimPlot(data, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')
+ggsave(g3, file=paste0(figure_folder,'/', sample_name, '_umap', '.pdf'), width=25, height=18, units='cm')
 
-g3 <- DimPlot(dat, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif') +
-guides(color=FALSE) +
-labs(x='UMAP 1', y='UMAP 2', title='')
+# output the number of each cell type
+cluster_counts <- data@meta.data %>%
+    count(customclassif)
+write.csv(cluster_counts, file=paste0(figure_folder, '/', sample_name, '_type_counts', '.csv'), row.names=FALSE)
 
-ggsave(g3, file='umap_2.png', width=25, height=18, units='cm')
-
-
-lapply(c("ggraph","igraph","tidyverse", "data.tree"), library, character.only = T)
+# load libraries
+#
+#
+lapply(c("ggraph","igraph","tidyverse", "data.tree", "ggthemes"), library, character.only = T)
 
 # prepare edges
-cL_resutls=cL_resutls[order(cL_resutls$cluster),]
-edges = cL_resutls
+cL_results=cL_results[order(cL_results$cluster),]
+edges = cL_results
 edges$type = paste0(edges$type,"_",edges$cluster)
 edges$cluster = paste0("cluster ", edges$cluster)
 edges = edges[,c("cluster", "type")]
@@ -106,8 +201,8 @@ ccolss= c("#5f75ae","#92bbb8","#64a841","#e5486e","#de8e06","#eccf5a",
             "#6a3d9a","#cab2d6","#ff7f00","#fdbf6f","#e31a1c",
             "#fb9a99","#33a02c","#b2df8a","#1f78b4","#a6cee3")
 
-for (i in 1:length(unique(cL_resutls$cluster))){
-  dt_tmp = cL_resutls[cL_resutls$cluster == unique(cL_resutls$cluster)[i], ]
+for (i in 1:length(unique(cL_results$cluster))){
+  dt_tmp = cL_results[cL_results$cluster == unique(cL_results$cluster)[i], ]
   nodes_lvl2 = rbind(nodes_lvl2, 
   data.frame(cluster = paste0(dt_tmp$type,"_",dt_tmp$cluster), ncells = dt_tmp$scores, Colour = ccolss[i], ord = 2, realname = dt_tmp$type))
 }
@@ -141,17 +236,17 @@ gggr<- ggraph(mygraph, layout = 'circlepack', weight=I(ncells)) +
       axis.title.y=element_blank(),
       plot.background = element_blank())
 
-ggsave(gggr, file='bubble.png', width=25, height=25, units='cm')
+ggsave(gggr, file=paste0(figure_folder, '/', sample_name, '-bubble.png'), width=25, height=25, units='cm')
 
 library(cowplot)
 g4 <-  plot_grid(g3, gggr, labels = c('A', 'B'), label_size = 12, rel_widths=c(0.45, 0.55))
-ggsave(g4, file='clusters_combined.png', width=45, height=25, units='cm')
+ggsave(g4, file=paste0(figure_folder, '/', sample_name, '-clusters_combined.png'), width=45, height=25, units='cm')
 
 
 if(FALSE){
   source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/auto_detect_tissue_type.R")
-  db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
-  tissue_guess = auto_detect_tissue_type(path_to_db_file = db_, seuratObject = dat, scaled = TRUE, assay = "RNA")
+  db_ = "data/ScTypeDB_full.xlsx";
+  tissue_guess = auto_detect_tissue_type(path_to_db_file = db_, seuratObject = data, scaled = TRUE, assay = "RNA")
 }
 
 quit()

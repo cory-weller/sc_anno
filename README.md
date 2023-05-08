@@ -1,3 +1,16 @@
+# README
+
+## Environment
+
+Retrieve prebuilt singularity container
+```bash
+bash src/check_sif.sh
+```
+
+
+
+```
+
 Create an environment with at least what is in the requirements.txt file.
 
 

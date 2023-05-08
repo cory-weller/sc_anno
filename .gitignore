@@ -6,3 +6,5 @@
 *slurm_out*
 figures/*
 nightly*
+cellranger-7.1.0
+cellranger*

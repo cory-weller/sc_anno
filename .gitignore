@@ -8,3 +8,4 @@ figures/*
 nightly*
 cellranger-7.1.0
 cellranger*
+*.gz

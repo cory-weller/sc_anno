@@ -68,8 +68,8 @@ A prebuilt reference for GRCh38 (11GB) can be directly downloaded:
 wget https://cf.10xgenomics.com/supp/cell-exp/refdata-gex-GRCh38-2020-A.tar.gz
 # md5sum = dfd654de39bff23917471e7fcc7a00cd
 ```
-Alternatively, it can be built after downloading source data. About
-15 GB of space is required for the build process.
+Alternatively, it can be built after downloading source data. Up to 30
+GB of disk space will be needed during the build process.
 ```bash
 bash  src/build_GRCh38_ref.sh
 ```
